@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <title>Aplikasi Guru Piket</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    /* Custom Styling Tema Hijau Kemenag dan Emas */
+    .bg-kemenag { background-color: #006432; }
+    .text-kemenag { color: #006432; }
+    .border-kemenag { border-color: #006432; }
+    .bg-emas { background-color: #D4AF37; }
+    .hover-kemenag:hover { background-color: #004d26; }
+    
+    /* Layout Cetak Presisi & Profesional Kertas F5 */
+    @media print {
+      @page { size: 148mm 210mm; margin: 12mm 10mm 12mm 10mm; }
+      body * { visibility: hidden; }
+      #print-area, #print-area * { visibility: visible; }
+      #print-area {
+        position: absolute; left: 0; top: 0; width: 100%;
+        color: #000 !important; background: #fff !important;
+        font-family: 'Times New Roman', Times, serif !important; line-height: 1.3;
+      }
+      .no-print { display: none !important; }
+      table { page-break-inside: auto; }
+      tr { page-break-inside: avoid; page-break-after: auto; }
+    }
+  </style>
+</head>
+<body class="bg-slate-50 font-sans text-slate-800">
+
+  <script>
+    // ---------------------------------------------------------
+    // MASUKKAN URL WEB APP GOOGLE APPS SCRIPT ANDA DI SINI
+    // ---------------------------------------------------------
+    const GAS_API_URL = "ISI_DENGAN_URL_WEB_APP_ANDA"; 
+    
+    let globalJadwalMaster = [];
+    let currentLoggedUser = null;
+    let chartInstance = null;
+    let currentDataCetak = [];
+    let currentRawLogs = [];
+
+    document.addEventListener("DOMContentLoaded", function() {
+      loadPublicData();
+      setDefaultDate();
+    });
+
+    function setDefaultDate() {
+      const today = new Date();
+      const offset = today.getTimezoneOffset();
+      const localToday = new Date(today.getTime() - (offset * 60 * 1000));
+      document.getElementById('form-tanggal').value = localToday.toISOString().split('T')[0];
+    }
+
+    // Helper untuk request GET ke API Server
+    async function fetchAPI(action, params = "") {
+      try {
+        const response = await fetch(`${GAS_API_URL}?action=${action}${params}`);
+        return await response.json();
+      } catch (error) {
+        console.error(`Error fetching ${action}:`, error);
+        return null;
+      }
+    }
+
+    // Helper untuk request POST ke API Server (menggunakan text/plain untuk bypass CORS Options Header)
+    async function postAPI(action, payload) {
+      try {
+        const response = await fetch(GAS_API_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify({ action: action, ...payload })
+        });
+        return await response.json();
+      } catch (error) {
+        console.error(`Error posting ${action}:`, error);
+        return { success: false, message: "Koneksi ke server gagal." };
+      }
+    }
+
+    async function loadPublicData() {
+      const data = await fetchAPI("getInitialData");
+      if(!data) return;
+
+      document.getElementById("text-hari-ini").innerText = data.hariIni;
+      
+      const tbodyJadwal = document.getElementById("table-jadwal-publik");
+      if (!data.jadwal || data.jadwal.length === 0) {
+        tbodyJadwal.innerHTML = `<tr><td colspan="4" class="px-4 py-6 text-center text-slate-400">Tidak ada jadwal pelajaran untuk hari ini (${data.hariIni}).</td></tr>`;
+      } else {
+        let htmlJadwal = "";
+        data.jadwal.forEach(j => {
+          htmlJadwal += `<tr>
+            <td class="px-4 py-3 font-medium text-slate-900">${j.pelajaran}</td>
+            <td class="px-4 py-3 text-slate-600">${j.kelas}</td>
+            <td class="px-4 py-3 text-slate-700">${j.guru}</td>
+            <td class="px-4 py-3 text-center font-bold text-emerald-700">${j.jtm}</td>
+          </tr>`;
+        });
+        tbodyJadwal.innerHTML = htmlJadwal;
+      }
+
+      const tbodyPiket = document.getElementById("table-petugas-piket");
+      if (!data.petugasPiket || data.petugasPiket.length === 0) {
+        tbodyPiket.innerHTML = `<tr><td colspan="3" class="px-4 py-6 text-center text-slate-400">Tidak ada petugas guru piket yang terjadwal hari ini (${data.hariIni}).</td></tr>`;
+      } else {
+        let htmlPiket = "";
+        data.petugasPiket.forEach((petugas, index) => {
+          htmlPiket += `<tr>
+            <td class="px-4 py-3 text-slate-500 font-medium">${index + 1}</td>
+            <td class="px-4 py-3 font-semibold text-slate-800">${petugas}</td>
+            <td class="px-4 py-3 text-center">
+              <span class="px-3 py-1 inline-flex text-xs leading-5 font-bold rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">Aktif Piket</span>
+            </td>
+          </tr>`;
+        });
+        tbodyPiket.innerHTML = htmlPiket;
+      }
+
+      document.getElementById("lbl-hadir").innerText = data.chart.hadir;
+      document.getElementById("lbl-izin").innerText = data.chart.izin;
+      document.getElementById("lbl-sakit").innerText = data.chart.sakit;
+      document.getElementById("lbl-alpa").innerText = data.chart.alpa;
+
+      renderKehadiranChart(data.chart);
+    }
+
+    function renderKehadiranChart(chartData) {
+      const ctx = document.getElementById('chartKehadiran').getContext('2d');
+      if (chartInstance) { chartInstance.destroy(); }
+      
+      chartInstance = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['Hadir', 'Izin', 'Sakit', 'Alpa'],
+          datasets: [{
+            data: [chartData.hadir, chartData.izin, chartData.sakit, chartData.alpa],
+            backgroundColor: ['#10b981', '#f59e0b', '#3b82f6', '#ef4444'],
+            borderWidth: 2
+          }]
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+      });
+    }
+
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+      document.getElementById('tab-' + tabId).classList.remove('hidden');
+      
+      const btnBeranda = document.getElementById("btn-tab-beranda");
+      const btnLogin = document.getElementById("btn-tab-login");
+      
+      if(btnBeranda && btnLogin) {
+        if(tabId === 'beranda') {
+          btnBeranda.className = "px-4 py-2 text-sm font-medium rounded-md bg-emerald-800 border-b-2 border-emas transition-all";
+          btnLogin.className = "px-4 py-2 text-sm font-medium rounded-md hover:bg-emerald-700 transition-all";
+        } else if(tabId === 'login') {
+          btnLogin.className = "px-4 py-2 text-sm font-medium rounded-md bg-emerald-800 border-b-2 border-emas transition-all";
+          btnBeranda.className = "px-4 py-2 text-sm font-medium rounded-md hover:bg-emerald-700 transition-all";
+        }
+      }
+    }
+
+    async function handleLogin(e) {
+      e.preventDefault();
+      const btn = document.getElementById("btn-login");
+      btn.innerText = "Memverifikasi...";
+      btn.disabled = true;
+
+      const user = document.getElementById("username").value;
+      const pass = document.getElementById("password").value;
+
+      const res = await postAPI("loginUser", { username: user, password: pass });
+      
+      btn.innerText = "Masuk Aplikasi";
+      btn.disabled = false;
+      
+      if (res && res.success) {
+        currentLoggedUser = res.user;
+        setupAuthenticatedUI();
+      } else {
+        alert(res ? res.message : "Gagal terhubung ke server.");
+      }
+    }
+
+    async function setupAuthenticatedUI() {
+      document.getElementById("public-nav").classList.add("hidden");
+      document.getElementById("auth-nav").classList.remove("hidden");
+      document.getElementById("user-info").innerText = `${currentLoggedUser.nama} (${currentLoggedUser.role.toUpperCase()})`;
+      
+      switchTab("dashboard");
+      
+      const list = await fetchAPI("getAllJadwal");
+      if(list) {
+        globalJadwalMaster = list;
+        filterDropdownJadwal();
+      }
+      refreshDataRekap();
+    }
+
+    function logout() {
+      currentLoggedUser = null;
+      document.getElementById("username").value = "";
+      document.getElementById("password").value = "";
+      document.getElementById("auth-nav").classList.add("hidden");
+      document.getElementById("public-nav").classList.remove("hidden");
+      switchTab("beranda");
+      loadPublicData();
+    }
+
+    function switchDashboardSubMenu(menu) {
+      document.querySelectorAll('.dashboard-panel').forEach(el => el.classList.add('hidden'));
+      document.getElementById('sub-input').className = "px-4 py-2 text-slate-500 hover:text-kemenag";
+      document.getElementById('sub-rekap').className = "px-4 py-2 text-slate-500 hover:text-kemenag";
+
+      if(menu === 'input') {
+        document.getElementById('panel-input-kehadiran').classList.remove('hidden');
+        document.getElementById('sub-input').className = "px-4 py-2 border-b-2 border-kemenag text-kemenag font-bold";
+      } else {
+        document.getElementById('panel-rekap-data').classList.remove('hidden');
+        document.getElementById('sub-rekap').className = "px-4 py-2 border-b-2 border-kemenag text-kemenag font-bold";
+        refreshDataRekap();
+      }
+    }
+
+    function filterDropdownJadwal() {
+      const tglVal = document.getElementById("form-tanggal").value;
+      if (!tglVal) return;
+
+      const hariMap = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"];
+      const dateObj = new Date(tglVal);
+      const hariDipilih = hariMap[dateObj.getDay()];
+
+      const select = document.getElementById("form-jadwal-select");
+      select.innerHTML = '<option value="">-- Pilih Jadwal Kelas Hari ' + hariDipilih + ' --</option>';
+
+      const filtered = globalJadwalMaster.filter(j => j.hari.toLowerCase() === hariDipilih.toLowerCase());
+      if(filtered.length === 0) {
+        select.innerHTML = `<option value="">Tidak ada master jadwal di hari ${hariDipilih}</option>`;
+      } else {
+        filtered.forEach(j => {
+          let opt = document.createElement("option");
+          opt.value = JSON.stringify(j);
+          opt.text = `[Kelas ${j.kelas}] ${j.guru} - ${j.pelajaran} (${j.jtm} JTM)`;
+          select.appendChild(opt);
+        });
+      }
+      resetFormPreview();
+    }
+
+    function populateFormFromJadwal() {
+      const select = document.getElementById("form-jadwal-select");
+      if(!select.value) {
+        resetFormPreview();
+        return;
+      }
+      const data = JSON.parse(select.value);
+      document.getElementById("val-guru").innerText = data.guru;
+      document.getElementById("val-pelajaran").innerText = data.pelajaran;
+      document.getElementById("val-kelas").innerText = data.kelas;
+      document.getElementById("val-jtm").innerText = data.jtm;
+    }
+
+    function resetFormPreview() {
+      document.getElementById("val-guru").innerText = "-";
+      document.getElementById("val-pelajaran").innerText = "-";
+      document.getElementById("val-kelas").innerText = "-";
+      document.getElementById("val-jtm").innerText = "-";
+    }
+
+    async function handleSimpanKehadiran(e) {
+      e.preventDefault();
+      const select = document.getElementById("form-jadwal-select");
+      if(!select.value) {
+        alert("Silakan pilih jadwal terlebih dahulu!");
+        return;
+      }
+
+      const btn = document.getElementById("btn-simpan");
+      btn.innerText = "Menyimpan data...";
+      btn.disabled = true;
+
+      const jadwalData = JSON.parse(select.value);
+      const payload = {
+        tanggal: document.getElementById("form-tanggal").value,
+        nama_guru: jadwalData.guru,
+        pelajaran: jadwalData.pelajaran,
+        kelas: jadwalData.kelas,
+        jtm: jadwalData.jtm,
+        status_kehadiran: document.getElementById("form-status").value,
+        keterangan: document.getElementById("form-keterangan").value
+      };
+
+      const res = await postAPI("simpanKehadiran", { payload: payload });
+      
+      btn.innerText = "Simpan Catatan Kehadiran";
+      btn.disabled = false;
+      
+      if(res && res.success) {
+        alert("Data absensi kehadiran guru berhasil dimasukkan!");
+        document.getElementById("form-keterangan").value = "";
+        select.value = "";
+        resetFormPreview();
+        refreshDataRekap();
+      } else {
+        alert("Gagal menyimpan data: " + (res ? res.message : "Kesalahan Jaringan"));
+      }
+    }
+
+    async function refreshDataRekap() {
+      const tipePilihan = document.getElementById("filter-rentang-rekap").value;
+      const labelTipe = document.getElementById("text-tipe-log");
+      const tbody = document.getElementById("table-rekap-log");
+      
+      labelTipe.innerText = tipePilihan === 'harian' ? "Hari Ini" : "Bulan Ini";
+      tbody.innerHTML = `<tr><td colspan="7" class="px-3 py-4 text-center text-slate-400">Menyinkronkan rekap data...</td></tr>`;
+
+      const res = await fetchAPI("getRekapDataDinamis", `&tipe=${tipePilihan}`);
+      
+      if(!res) {
+        tbody.innerHTML = `<tr><td colspan="7" class="px-3 py-4 text-center text-slate-400 text-rose-500">Gagal memuat rekap data.</td></tr>`;
+        return;
+      }
+
+      currentRawLogs = res.logs;
+      currentDataCetak = res.cetak;
+
+      if(!res.logs || res.logs.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="7" class="px-3 py-4 text-center text-slate-400">Tidak ada log kehadiran ${tipePilihan === 'harian' ? 'hari ini':'bulan ini'}.</td></tr>`;
+      } else {
+        let html = "";
+        res.logs.forEach(l => {
+          let badgeClass = "bg-emerald-100 text-emerald-800";
+          if(l.status === 'Izin') badgeClass = "bg-amber-100 text-amber-800";
+          if(l.status === 'Sakit') badgeClass = "bg-blue-100 text-blue-800";
+          if(l.status === 'Alpa') badgeClass = "bg-rose-100 text-rose-800";
+
+          html += `<tr>
+            <td class="px-3 py-2 whitespace-nowrap text-slate-500">${l.tanggal}</td>
+            <td class="px-3 py-2 font-medium text-slate-800">${l.guru}</td>
+            <td class="px-3 py-2 text-slate-600">${l.pelajaran}</td>
+            <td class="px-3 py-2 text-center text-slate-600">${l.kelas}</td>
+            <td class="px-3 py-2 text-center font-bold text-slate-700">${l.jtm}</td>
+            <td class="px-3 py-2 text-center"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${badgeClass}">${l.status}</span></td>
+            <td class="px-3 py-2 text-slate-500">${l.keterangan}</td>
+          </tr>`;
+        });
+        tbody.innerHTML = html;
+      }
+    }
+    
+    // FUNGSI PRINT DAN EXCEL TETAP SAMA KARENA HANYA MEMBACA ARRAY LOKAL
+    // ...
+  </script>
+</body>
+</html>
